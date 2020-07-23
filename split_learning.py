@@ -1,11 +1,9 @@
 from mpi4py import MPI
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
-
 import os
 from time import time
 import pickle
@@ -13,17 +11,12 @@ import itertools
 import numpy as np
 from sys import argv
 from argparse import ArgumentParser, Namespace
-
-from models import ClientNN, ServerNN
+from model import ClientNN, ServerNN
 from plotting import generate_simple_plot
 
 
-def parse_args() -> Namespace:
-    """Parses CL arguments
+def parse_args():
 
-    Returns:
-        Namespace object containing all arguments
-    """
     parser = ArgumentParser()
 
     parser.add_argument("-bs", "--batch_size", type=int, default=64)
@@ -52,7 +45,132 @@ SERVER = 0
 
 #Server
 if rank == 0:
-    continue
+    model = ServerNN()
+    model = model.to(device)
+
+    # Define the loss criterion
+    loss_crit = nn.CrossEntropyLoss()
+
+    # Use Stochastic Gradient Descent with momentum and weight decay
+    # as the optimizer
+    optimizer = optim.SGD(model.parameters(), lr=args.learning_rate,
+            momentum=0.9, weight_decay=5e-4)
+
+    total_training_time = 0.0
+
+    epoch, step, batch_idx = 1, 0, 0
+
+    curr, phase = 1, "train"
+
+    val_loss, val_losses, val_accs = 0.0, [], []
+    total_n_labels_train, total_n_labels_test = 0, 0
+    correct_train, correct_test = 0, 0
+
+    while(True):
+        msg = comm.recv(source=curr)
+
+        if msg[0] == "tensor_and_labels":
+            if phase == "train":
+                optimizer.zero_grad()
+
+            input_tensor, labels = msg[1]
+
+            logits = model(input_tensor)
+
+            _, predictions = logits.max(1)
+
+            loss = loss_crit(logits, labels)
+
+            if phase == "train":
+                total_n_labels_train += len(labels)
+
+                correct_train += predictions.eq(labels).sum().item()
+
+                loss.backward()
+
+                optimizer.step()
+
+                comm.send(input_tensor.grad, dest=curr)
+
+                batch_idx += 1
+
+                if batch_idx % args.log_steps == 0:
+                    acc = correct_train / total_n_labels_train
+
+                    print('{} - Epoch: {} [{}/{} ({:.0f}%)] Loss: {:.6f}'.format(
+                        curr, epoch, int((
+                        args.num_batches * args.batch_size) / max_rank * (
+                        curr-1)) + batch_idx * args.batch_size,
+                        args.num_batches * args.batch_size, 100. * (((
+                        args.num_batches / max_rank * (curr-1)) + \
+                        batch_idx) / args.num_batches), loss.item()))
+
+            if phase == "validation":
+                step += 1
+                total_n_labels_test += len(labels)
+
+                correct_test += predictions.eq(labels).sum().item()
+                val_loss += loss.item()
+
+        elif msg[0] == "time":
+            total_training_time += msg[1]
+
+        elif msg == "worker_done":
+            if curr == max_rank:
+                epoch += 1
+
+            curr = (curr % max_rank) + 1
+            phase = "train"
+
+            total_n_labels_train, correct_train, batch_idx = 0, 0 ,0
+
+        elif msg == "epoch_done" or msg == "training_complete":
+            val_loss /= step
+            val_losses.append(val_loss)
+
+            acc = correct_test / total_n_labels_test
+            val_accs.append(acc)
+
+            print("\nTest set - Epoch: {} - Loss: {:.4f}, Acc: ({:2f}%)\n".format(
+                epoch, val_loss, 100 * acc))
+
+            if curr == max_rank:
+                epoch += 1
+
+            curr = (curr % max_rank) + 1
+            phase = "train"
+
+            total_n_labels_test, correct_test = 0, 0
+            step, batch_idx = 0, 0
+
+            if msg == "training_complete":
+                print("Training complete.")
+
+                epoch_list = list(range(1, args.epochs+1))
+                generate_simple_plot(epoch_list, val_losses,
+                        "Test loss (Split Learning)", "epoch", "loss", [0.3, 0.9],
+                        save=True, fname="test_loss_sl.pdf")
+                generate_simple_plot(epoch_list, val_accs,
+                        "Test accuracy (Split Learning)", "epoch", "accuracy",
+                        [0.65, 1.0], save=True, fname="test_acc_sl.pdf")
+
+                print("Total training time: {:.2f}s".format(total_training_time))
+                print("Final test accuracy: {:.4f}".format(acc))
+                print("Final test loss: {:.4f}".format(val_loss))
+
+                exit()
+
+            # Only reset validation loss if training not complete
+            val_loss = 0.0
+
+        elif msg == "validation":
+            phase = "validation"
+            step , total_n_labels_train, correct_train = 0, 0, 0
+
+        elif msg == "data_downloaded":
+            exit()
+
+
 
 #Client
 else:
@@ -114,7 +232,7 @@ else:
 
         msg = comm.recv(source=onleft)
 
-        if msg == "you_can_start":
+        if msg == "Comienzo":
             if rank == 1:
                 print(f"\nStart epoch {epoch}:")
 
@@ -159,7 +277,7 @@ else:
                 del split_layer_tensor, inputs, labels
                 torch.cuda.empty_cache()
 
-            comm.send("you_can_start", dest=onright)
+            comm.send("Comienzo", dest=onright)
 
             if epoch == args.epochs:
                 msg="training_complete" if rank == max_rank else "worker_done"
