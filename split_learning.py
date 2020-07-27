@@ -105,7 +105,7 @@ if rank == 0:
                         args.num_batches / max_rank * (curr-1)) + \
                         batch_idx) / args.num_batches), loss.item()))
 
-            if phase == "validation":
+            if phase == "test":
                 step += 1
                 total_n_labels_test += len(labels)
 
@@ -160,11 +160,11 @@ if rank == 0:
 
                 exit()
 
-            # Only reset validation loss if training not complete
+            # Only reset test loss if training not complete
             val_loss = 0.0
 
-        elif msg == "validation":
-            phase = "validation"
+        elif msg == "test":
+            phase = "test"
             step , total_n_labels_train, correct_train = 0, 0, 0
 
         elif msg == "data_downloaded":
@@ -263,7 +263,7 @@ else:
             comm.send(["time", end-start], dest=SERVER)
 
             if rank == max_rank:
-                comm.send("validation", dest=SERVER)
+                comm.send("test", dest=SERVER)
 
                 for batch_idx, (inputs, labels) in enumerate(test_loader):
                     
